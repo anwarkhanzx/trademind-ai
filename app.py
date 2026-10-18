@@ -10,14 +10,11 @@ layout="wide"
 )
 
 BASE_URL = "https://openapi.blofin.com"
-
 PAIRS = ["BTC-USDT", "ETH-USDT", "SOL-USDT"]
 
 st.title("📈 TradeMind AI")
 st.caption("Crypto Futures Signal Dashboard")
-st.info("Rule-based signals for analysis only. Trades are placed manually.")
-
-st.sidebar.header("Settings")
+st.warning("Educational signals only. Trades must be placed manually.")
 
 timeframe = st.sidebar.selectbox(
 "Timeframe",
@@ -26,23 +23,18 @@ index=1
 )
 
 selected_pairs = st.sidebar.multiselect(
-"Trading Pairs",
+"Select Coins",
 PAIRS,
 default=PAIRS
 )
 
-if st.sidebar.button("🔄 Refresh Market Data"):
-st.cache_data.clear()
-st.rerun()
-
 @st.cache_data(ttl=60)
 def get_candles(symbol, timeframe):
-url = f"{BASE_URL}/api/v1/market/candles"
-
+url = BASE_URL + "/api/v1/market/candles"
 params = {
-    "instId": symbol,
-    "bar": timeframe,
-    "limit": "100"
+"instId": symbol,
+"bar": timeframe,
+"limit": "100"
 }
 
 response = requests.get(
@@ -50,52 +42,48 @@ response = requests.get(
     params=params,
     timeout=15
 )
-
 response.raise_for_status()
 result = response.json()
 
 if result.get("code") != "0":
     raise ValueError(
-        result.get("msg", "Market data unavailable")
+        result.get("msg", "BloFin API error")
     )
 
 rows = result.get("data", [])
 
 if not rows:
-    raise ValueError("No candle data received")
-
-columns = [
-    "time",
-    "open",
-    "high",
-    "low",
-    "close",
-    "volume",
-    "volCurrency",
-    "volCurrencyQuote",
-    "confirm"
-]
+    raise ValueError("No market data received")
 
 df = pd.DataFrame(rows)
 
 if df.shape[1] < 5:
-    raise ValueError("Unexpected candle data format")
+    raise ValueError("Unexpected candle format")
 
-df = df.iloc[:, :min(len(columns), df.shape[1])]
-df.columns = columns[:df.shape[1]]
+df = df.iloc[:, :min(df.shape[1], 9)]
 
-for col in ["open", "high", "low", "close"]:
-    df[col] = pd.to_numeric(df[col], errors="coerce")
+names = [
+    "time", "open", "high", "low", "close",
+    "volume", "volCurrency", "volCurrencyQuote",
+    "confirm"
+]
+df.columns = names[:df.shape[1]]
+
+for column in ["open", "high", "low", "close"]:
+    df[column] = pd.to_numeric(
+        df[column],
+        errors="coerce"
+    )
 
 df = df.dropna(subset=["close"])
 df = df.iloc[::-1].reset_index(drop=True)
 
 if len(df) < 51:
-    raise ValueError("Not enough candles for EMA analysis")
+    raise ValueError("Insufficient candles")
 
 return df
 
-def analyze_market(df):
+def analyze(df):
 df = df.copy()
 
 df["ema20"] = df["close"].ewm(
@@ -108,25 +96,23 @@ df["ema50"] = df["close"].ewm(
     adjust=False
 ).mean()
 
-delta = df["close"].diff()
+change = df["close"].diff()
+gains = change.clip(lower=0)
+losses = -change.clip(upper=0)
 
-gain = delta.clip(lower=0)
-loss = -delta.clip(upper=0)
-
-avg_gain = gain.ewm(
+avg_gain = gains.ewm(
     alpha=1 / 14,
     min_periods=14,
     adjust=False
 ).mean()
 
-avg_loss = loss.ewm(
+avg_loss = losses.ewm(
     alpha=1 / 14,
     min_periods=14,
     adjust=False
 ).mean()
 
 rs = avg_gain / avg_loss.replace(0, float("nan"))
-
 df["rsi"] = 100 - (100 / (1 + rs))
 
 last = df.iloc[-1]
@@ -142,27 +128,26 @@ rsi = (
 )
 
 signal = "WAIT"
-reason = "No confirmed setup"
+reason = "Conditions not confirmed"
 
 if ema20 > ema50 and 50 < rsi < 70:
     signal = "BUY"
-    reason = "EMA20 above EMA50 and RSI bullish"
+    reason = "Bullish EMA trend and RSI confirmation"
 
 elif ema20 < ema50 and 30 < rsi < 50:
     signal = "SELL"
-    reason = "EMA20 below EMA50 and RSI bearish"
+    reason = "Bearish EMA trend and RSI confirmation"
 
-entry = price
-sl = None
-tp = None
+stop_loss = None
+take_profit = None
 
 if signal == "BUY":
-    sl = entry * 0.99
-    tp = entry * 1.02
+    stop_loss = price * 0.99
+    take_profit = price * 1.02
 
 elif signal == "SELL":
-    sl = entry * 1.01
-    tp = entry * 0.98
+    stop_loss = price * 1.01
+    take_profit = price * 0.98
 
 return {
     "price": price,
@@ -171,18 +156,19 @@ return {
     "rsi": rsi,
     "signal": signal,
     "reason": reason,
-    "entry": entry,
-    "sl": sl,
-    "tp": tp
+    "sl": stop_loss,
+    "tp": take_profit
 }
 
+if st.button("Refresh Market Data"):
+st.cache_data.clear()
+
 st.caption(
-"Page generated at: "
-+ datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+"Updated: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 )
 
 if not selected_pairs:
-st.warning("Select at least one trading pair.")
+st.info("Select at least one coin from the sidebar.")
 
 for symbol in selected_pairs:
 st.divider()
@@ -190,75 +176,44 @@ st.subheader(symbol)
 
 try:
     candles = get_candles(symbol, timeframe)
-    result = analyze_market(candles)
+    data = analyze(candles)
 
-    c1, c2, c3 = st.columns(3)
+    col1, col2, col3 = st.columns(3)
 
-    c1.metric(
-        "Last Candle Close",
-        f'{result["price"]:,.4f}'
-    )
+    col1.metric("Last Candle Close", f'{data["price"]:,.4f}')
+    col2.metric("RSI (14)", f'{data["rsi"]:.2f}')
+    col3.metric("Signal", data["signal"])
 
-    c2.metric(
-        "RSI (14)",
-        f'{result["rsi"]:.2f}'
-    )
+    st.write("**Reason:**", data["reason"])
 
-    c3.metric(
-        "Signal",
-        result["signal"]
-    )
+    col4, col5 = st.columns(2)
+    col4.metric("EMA 20", f'{data["ema20"]:,.4f}')
+    col5.metric("EMA 50", f'{data["ema50"]:,.4f}')
 
-    st.write("**Analysis:**", result["reason"])
+    if data["signal"] != "WAIT":
+        col6, col7, col8 = st.columns(3)
 
-    a, b, c = st.columns(3)
+        col6.metric("Entry Reference", f'{data["price"]:,.4f}')
+        col7.metric("Stop Loss", f'{data["sl"]:,.4f}')
+        col8.metric("Take Profit", f'{data["tp"]:,.4f}')
 
-    a.metric("EMA 20", f'{result["ema20"]:,.4f}')
-    b.metric("EMA 50", f'{result["ema50"]:,.4f}')
-
-    if result["signal"] != "WAIT":
-        st.subheader("Trade Setup")
-
-        x, y, z = st.columns(3)
-
-        x.metric(
-            "Entry Reference",
-            f'{result["entry"]:,.4f}'
+        st.info(
+            "Illustrative 1:2 risk/reward levels. "
+            "Verify the setup before trading."
         )
-
-        y.metric(
-            "Stop Loss",
-            f'{result["sl"]:,.4f}'
-        )
-
-        z.metric(
-            "Take Profit",
-            f'{result["tp"]:,.4f}'
-        )
-
-        st.warning(
-            "Verify the setup before trading. "
-            "These are illustrative price levels, "
-            "not guaranteed profitable signals."
-        )
-
     else:
-        st.info("WAIT: No setup confirmed by this strategy.")
+        st.info("WAIT: No confirmed setup.")
 
 except Exception as error:
-    st.error(
-        f"Could not load {symbol}: {error}"
-    )
+    st.error("Could not load " + symbol + ": " + str(error))
 
 st.divider()
-
-st.subheader("⚠️ Risk Disclaimer")
+st.subheader("Risk Disclaimer")
 
 st.write(
-"This is an experimental rule-based signal dashboard, "
-"not a guarantee of profit. The market data endpoint and "
-"response format must be verified. Signals may be wrong. "
-"Backtest and paper-trade before risking real money. "
+"This experimental rule-based scanner does not guarantee profit. "
+"The API endpoint and candle format must be verified. "
+"Test with historical data and paper trading before using real money. "
 "Fees, slippage and leverage affect results. "
-"No trades are executed by this website."
+"This website does not execute trades."
 )
